@@ -9,7 +9,6 @@
    implement: `convert` , `ToolExecutor.run`, `get_schemas(convert)`
 
 ## Files
-- .gitignore
 - json_mode_schema.py
 - lab_sheet.html
 - tc_complete_currency.py
