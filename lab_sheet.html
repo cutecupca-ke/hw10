@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Currency Mini-Agent Lab Sheet</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-light.min.css">
+<style>
+body {
+    box-sizing: border-box;
+    max-width: 1000px;
+    margin: 2rem auto;
+    padding: 1rem 2rem;
+}
+pre {
+    background-color: #f6f8fa;
+    padding: 1rem;
+    overflow-x: auto;
+}
+code {
+    font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+}
+</style>
+</head>
+<body class="markdown-body">
+
+# Currency Mini-Agent Lab Sheet
+
+## STUDENT_TODO
+Currency mini-agent using LiteLLM tool calling (class-based)
+
+- Tools to support:
+  1) `list_supported() -> list[str]`              # PROVIDED (def + schema)
+  2) `resolve_currency(name_or_code: str) -> str`  # PROVIDED (def + schema)
+  3) `convert(amount: float, base: str, quote: str) -> dict`  # YOU implement (def + schema)
+
+- Keep INTERMEDIATE prints before each execution for teaching/debugging.
+
+---
+
+## Imports and Mock Data
+<pre><code class="language-python">from typing import Dict, Any, List
+from dataclasses import dataclass
+import json
+from litellm import completion
+from config import MODEL
+
+# ===== Mock data =====
+RATE_TABLE: Dict[str, float] = {
+    "USD-&gt;THB": 35.0,
+    "THB-&gt;USD": 0.0286,
+    "THB-&gt;EUR": 0.025,
+    "EUR-&gt;THB": 40.0,
+    "USD-&gt;EUR": 0.92,
+    "EUR-&gt;USD": 1.087,
+}
+SUPPORTED = ["USD", "THB", "EUR", "JPY"]
+NAME_TO_ISO = {"baht": "THB", "dollar": "USD", "euro": "EUR", "yen": "JPY"}
+</code></pre>
+
+---
+
+## ToolCall Dataclass
+<pre><code class="language-python">@dataclass
+class ToolCall:
+    name: str
+    arguments: str
+</code></pre>
+
+---
+
+## CurrencyTools Class
+<pre><code class="language-python">class CurrencyTools:
+    """Currency utilities exposed as tools."""
+
+    def list_supported(self) -&gt; List[str]:
+        return SUPPORTED
+
+    def resolve_currency(self, name_or_code: str) -&gt; str:
+        code = (name_or_code or "").strip().upper()
+        if code in SUPPORTED:
+            return code
+        return NAME_TO_ISO.get((name_or_code or "").strip().lower(), "UNKNOWN")
+
+    def convert(self, amount: float, base: str, quote: str) -&gt; Dict[str, Any]:
+        base_code = self.resolve_currency(base)
+        quote_code = self.resolve_currency(quote)
+        key = f"{base_code}-&gt;{quote_code}"
+        if key not in RATE_TABLE:
+            return {"error": f"No rate for {base_code}-&gt;{quote_code}"}
+        rate = RATE_TABLE[key]
+        converted = amount * rate
+        return {
+            "amount": amount,
+            "base": base_code,
+            "quote": quote_code,
+            "rate": rate,
+            "converted": converted
+        }
+
+    @classmethod
+    def get_schemas(cls) -&gt; List[dict]:
+        return [
+            {
+                "name": "list_supported",
+                "description": "Return supported currency ISO codes",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "resolve_currency",
+                "description": "Map currency name or code to ISO code (e.g., 'baht'-&gt;'THB')",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name_or_code": {"type": "string"}},
+                    "required": ["name_or_code"],
+                },
+            },
+            {
+                "name": "convert",
+                "description": "Convert amount from base to quote using fixed RATE_TABLE",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number"},
+                        "base": {"type": "string"},
+                        "quote": {"type": "string"}
+                    },
+                    "required": ["amount", "base", "quote"]
+                }
+            }
+        ]
+</code></pre>
+
+---
+
+## ToolExecutor Class
+<pre><code class="language-python">class ToolExecutor:
+    def __init__(self):
+        self.tools = {}
+        self.tool_schemas: List[dict] = []
+
+    def register_tool(self, name: str, func, schema: dict):
+        self.tools[name] = func
+        self.tool_schemas.append(schema)
+
+    def register_tools(self, tool_obj):
+        for schema in tool_obj.get_schemas():
+            name = schema["name"]
+            if not hasattr(tool_obj, name):
+                continue
+            self.register_tool(name, getattr(tool_obj, name), schema)
+
+    def run(self, user_text: str, model: str = MODEL, max_turns: int = 6):
+        messages = [{"role": "user", "content": user_text}]
+        for turn in range(1, max_turns + 1):
+            resp = completion(model=model, messages=messages, functions=self.tool_schemas, function_call="auto", temperature=0.2)
+            msg = resp.choices[0].message
+            fc: ToolCall | None = getattr(msg, "function_call", None)
+            if not fc:
+                final_result = None
+                for msg_entry in reversed(messages):
+                    if msg_entry["role"] == "function" and msg_entry["name"] == "convert":
+                        try:
+                            final_result = json.loads(msg_entry["content"])
+                            break
+                        except:
+                            continue
+                print("=== FINAL ===")
+                print(json.dumps(final_result, indent=2) if final_result else "{}")
+                break
+            print(f"=== INTERMEDIATE (turn {turn}) ===")
+            print("name:", getattr(fc, "name", None))
+            print("arguments:", getattr(fc, "arguments", None))
+            try:
+                args = json.loads(getattr(fc, "arguments", "{}") or "{}")
+                name = getattr(fc, "name", None)
+                result = self.tools[name](**args) if args else self.tools[name]()
+            except Exception as e:
+                result = {"error": str(e)}
+            messages.append({"role": "assistant", "content": None, "function_call": {"name": getattr(fc, "name", None), "arguments": getattr(fc, "arguments", "{}")}})
+            messages.append({"role": "function", "name": getattr(fc, "name", None), "content": json.dumps(result)})
+</code></pre>
+
+---
+
+## Main Execution Example
+<pre><code class="language-python">if __name__ == "__main__":
+    tools = CurrencyTools()
+    ex = ToolExecutor()
+    ex.register_tools(tools)
+    ex.run("Convert 100 USD to THB")
+    ex.run("Convert 250 baht to euros")
+</code></pre>
+
+---
+
+## Example Output
+<pre><code>=== INTERMEDIATE (turn 1) ===
+name: convert
+arguments: {"amount":100,"base":"USD","quote":"THB"}
+=== FINAL ===
+{
+  "amount": 100,
+  "base": "USD",
+  "quote": "THB",
+  "rate": 35.0,
+  "converted": 3500.0
+}
+=== INTERMEDIATE (turn 1) ===
+name: convert
+arguments: {"amount":250,"base":"THB","quote":"EUR"}
+=== INTERMEDIATE (turn 2) ===
+name: resolve_currency
+arguments: {"name_or_code":"baht"}
+=== FINAL ===
+{
+  "amount": 250,
+  "base": "THB",
+  "quote": "EUR",
+  "rate": 0.025,
+  "converted": 6.25
+}
+</code></pre>
+
+</body>
+</html>
